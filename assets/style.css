@@ -1,0 +1,12 @@
+body {
+  background-color: #faf1e8;
+}
+
+pretty-code > textarea {
+  background-color: #faf1e8;
+  border: black 2px solid;
+  font-size: 1.2em;
+  line-height: 1em;
+  width: 100%;
+  resize: vertical;
+}

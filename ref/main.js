@@ -1,7 +1,4 @@
-import {} from "./machine.js";
+import { toXNG } from "./machine.js";
 
-const program = `0、1、2加3a
-4减五乘一 二分七
-`;
-
-console.log(program);
+const program = `「字符串」即《加（方（甲），加（方（乙），乘（2，加（甲，乙）））》
+加展減合《（）》等陣「字符串」`;
