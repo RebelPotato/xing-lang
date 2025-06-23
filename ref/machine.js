@@ -1,30 +1,42 @@
+// Info for parsing and interpreting
+class Info {
+  constructor(verbs, advs, conjs) {
+    this.verbs = verbs;
+    this.advs = advs;
+    this.conjs = conjs;
+  }
+}
+
 // lexer and parser
 
-export function lex(tokens) {}
+export function lex(str) {}
 
 function parseExpr(tokens) {}
 
 //// interpreter
 
 function assert(condition, message) {
+  console.error("Implementation error:", message);
   if (!condition) throw new Error(message);
 }
 const Ok = (value) => ({
   value,
   then: (fn) => fn(value),
   map: (fn) => Ok(fn(value)),
+  mapErr: () => Ok(value),
   unwrap: () => value,
-  unwrapElse: (fn) => value,
+  unwrapElse: () => value,
   isOk: true,
 });
-const Err = (message) => ({
-  message,
-  then: () => Err(message),
-  map: () => Err(message),
+const Err = (ctx) => ({
+  ctx,
+  then: () => Err(ctx),
+  map: () => Err(ctx),
+  mapErr: (fn) => Err(fn(ctx)),
   unwrap: () => {
-    throw new Error(message);
+    throw new Error(ctx);
   },
-  unwrapElse: (fn) => fn(message),
+  unwrapElse: (fn) => fn(ctx),
   isOk: false,
 });
 function product(arr) {
@@ -62,19 +74,32 @@ function cnNumSilly(num) {
 }
 
 /// types
-const AtomTypeNames = ["int32", "char"];
-const AtomTypes = Object.fromEntries(AtomTypeNames.map((name) => [name, name]));
-const AtomInts = [AtomTypes.int32];
-const AtomFloats = [];
+const ATNames = ["bool", "int32", "float32", "char", "fn", "mod1", "mod2"];
+const AT = {
+  bool: "bool",
+  int32: "int32",
+  float32: "float32",
+  char: "char",
+  fn: "fn",
+  mod1: "mod1",
+  mod2: "mod2",
+};
+const AtomInts = [AT.int32];
+const AtomFloats = [AT.float32];
 const AtomNums = [...AtomInts, ...AtomFloats];
 // does a js value fit in an atom type?
 const fitInAtom = {
+  bool: (value) => typeof value === "boolean",
   int32: (value) =>
     typeof value === "number" &&
     Number.isInteger(value) &&
     value >= -2147483648 &&
     value <= 2147483647,
+  float32: (value) => typeof value === "number" && !Number.isNaN(value),
   char: (value) => typeof value === "string" && value.length === 1, // an unicode character according to JavaScript
+  fn: () => false,
+  mod1: () => false,
+  mod2: () => false,
 };
 class AtomBase {
   constructor(type) {
@@ -130,77 +155,74 @@ class Atom {
   base() {
     return new AtomBase(this.type);
   }
+  static bool(value) {
+    assert(fitInAtom.bool(value));
+    return new Atom(AT.bool, value);
+  }
+  static int32(value) {
+    assert(fitInAtom.int32(value));
+    return new Atom(AT.int32, value);
+  }
+  static float32(value) {
+    assert(fitInAtom.float32(value));
+    return new Atom(AT.float32, value);
+  }
+  static char(value) {
+    assert(fitInAtom.char(value));
+    return new Atom(AT.char, value);
+  }
 }
 class Arr {
-  constructor(type, shape, data) {
+  constructor(type, shape, data, fill) {
     this.type = type;
     this.shape = shape;
     this.data = data;
+    this.fill = fill;
   }
   base() {
     return new ArrBase(this.type, this.shape);
   }
 }
 class Boxes {
-  constructor(shape, data) {
+  constructor(shape, data, fill) {
     this.shape = shape;
     this.data = data;
+    this.fill = fill;
   }
   base() {
     return new BoxesBase(this.shape);
   }
 }
-// collapse an array of atoms/arrays into a single typed array if possible
-const nest = (shape) => (data) => {
-  if (data.length === 0) return new Boxes([], data);
-  let guessBase = null;
-  for (const item of data) {
-    const base = item.base();
-    if (guessBase === null) guessBase = base;
-    else if (!base.equals(guessBase)) return new Boxes(shape, data);
-  }
-  const newBase = guessBase.lift(shape);
-  const len = newBase.length();
-  const newData = Array(len);
-  if (guessBase instanceof AtomBase) {
-    for (let i = 0; i < len; i++) newData[i] = data[i].value;
-  } else {
-    let i = 0;
-    for (const item of data)
-      for (let j = 0; j < item.data.length; j++) {
-        newData[i] = item.data[j];
-        i++;
-      }
-  }
-  return new Arr(newBase.type, newBase.shape, newData);
-};
-// convert a js value to an XNG value
-export function toXNG(value) {
-  if (Array.isArray(value)) return nest([value.length])(value.map(toXNG));
-  if (typeof value === "string")
-    return new Arr(AtomTypes.char, [value.length], value.split(""));
-  for (const type of AtomTypeNames) {
-    if (fitInAtom[type](value)) return new Atom(type, value);
-  }
-  throw new Error("unreachable");
+function dispatch(table, types) {
+  const NotFound = Err(`dispatch.no_function_found`);
+  const arity = types.length;
+  const item = table[arity - 1];
+  if (item === undefined) return NotFound;
+  if (item.table !== undefined)
+    for (const [forTypes, ret, fn] of item.table)
+      if (arrayEquals(types, forTypes)) return Ok({ type: "static", ret, fn });
+  return item.default !== undefined
+    ? Ok({ type: "dynamic", fn: item.default })
+    : NotFound;
 }
+
+// temporary helper: format a atom or array
 function formatAtom(type, value) {
-  if (type === AtomTypes.int32) return value.toString();
-  if (type === AtomTypes.char) return value;
+  if (type === AT.int32) return value.toString();
+  if (type === AT.char) return value;
   throw new Error(`formatAtom: unsupported atom type ${type}`);
 }
 const leftpad = (str, len) => " ".repeat(len - str.length) + str;
 function format(x) {
   if (x instanceof Atom) {
     const str = formatAtom(x.type, x.value);
-    if (x.type === AtomTypes.char) str = `‘${str}’`;
+    if (x.type === AT.char) str = `‘${str}’`;
     return [str];
   }
   assert(!(x instanceof Boxes), "format: Boxes not supported yet");
   if (x.shape.length === 0) return ["空"];
   const strs = x.data.map((v) => formatAtom(x.type, v));
-  const collapse =
-    x.type === AtomTypes.char ? (x) => x.join("") : (x) => x.join(" ");
+  const collapse = x.type === AT.char ? (x) => x.join("") : (x) => x.join(" ");
   if (x.shape.length === 1) return [collapse(x.data)];
 
   // pad the strings in each column
@@ -234,212 +256,160 @@ function format(x) {
   return result;
 }
 
-/// atomic functions
-// unary
-function mapA1(f) {
-  function op(a) {
-    if (a instanceof Atom)
-      return f(a.type).map(
-        ([fn, outputType]) => new Atom(outputType, fn(a.value))
-      );
-    if (a.type === AtomTypes.box)
-      return liftOk(a.data.map(op)).map(nest(a.shape));
-    return f(a.type).map(
-      ([fn, outputType]) => new Arr(outputType, a.shape, a.data.map(fn))
-    );
+/// primitive operators
+// 类
+function type1(x) {
+  if (x instanceof Atom) {
+    if (AtomNums.includes(x.type)) return Ok(Atom.char("数"));
+    if (x.type === AT.char) return Ok(Atom.char("字"));
+    if (x.type === AT.fn) return Ok(Atom.char("动"));
+    if (x.type === AT.mod1) return Ok(Atom.char("单"));
+    if (x.type === AT.mod2) return Ok(Atom.char("双"));
+    assert(false);
   }
-  return op;
+  if (x instanceof Arr || x instanceof Boxes) return Ok(Atom.char("阵"));
+  assert(false);
 }
-const negate1 = mapA1((type) => {
-  if (AtomNums.includes(type)) return Ok([(x) => -x, type]);
-  return Err(`negate not supported for type ${type}`);
-});
-
-// binary
-function mapA2(f) {
-  // op where a and b are both atoms
-  const opAB = (aType, aValue, bType, bValue) =>
-    f(aType, bType).map(
-      ([fn, outputType]) => new Atom(outputType, fn(aValue, bValue))
-    );
-  // op where a is an atom and b is an atom or array
-  function opA(aType, aValue, b) {
-    if (b instanceof Atom) return opAB(aType, aValue, b.type, b.value);
-    // map over b
-    if (b instanceof Boxes)
-      return liftOk(b.data.map((x) => opA(aType, aValue, x))).map(
-        nest(b.shape)
-      );
-    return f(aType, b.type).map(
-      ([fn, outputType]) =>
-        new Arr(
-          outputType,
-          b.shape,
-          b.data.map((x) => fn(aValue, x))
-        )
-    );
-  }
-  // op where a is an atom or array and b is an atom
-  function opB(a, bType, bValue) {
-    if (a instanceof Atom) return opAB(a.type, a.value, bType, bValue);
-    // map over a
-    if (a instanceof Boxes)
-      return liftOk(a.data.map((x) => opB(x, bType, bValue))).map(
-        nest(a.shape)
-      );
-    return f(a.type, bType).map(
-      ([fn, outputType]) =>
-        new Arr(
-          outputType,
-          a.shape,
-          a.data.map((x) => fn(x, bValue))
-        )
-    );
-  }
-  function op(a, b) {
-    if (a instanceof Atom) return opA(a.type, a.value, b);
-    if (b instanceof Atom) return opB(a, b.type, b.value);
-    // two arrays must have the same shape
-    if (!arrayEquals(a.shape, b.shape))
-      return Err(`arrays must have the same shape: ${a.shape} vs ${b.shape}`);
-    if (a instanceof Boxes) {
-      if (b instanceof Boxes)
-        return liftOk(map2(op, a.data, b.data)).map(nest(a.shape));
-      return liftOk(map2((x, y) => opA(a.type, x, y), a.data, b.data)).map(
-        nest(a.shape)
-      );
-    }
-    if (b instanceof Boxes)
-      return liftOk(map2((x, y) => opB(x, b.type, y), a.data, b.data)).map(
-        nest(b.shape)
-      );
-    // both are arrays with the same base type
-    return f(a.type, b.type).map(
-      ([fn, outputType]) =>
-        new Arr(outputType, a.shape, map2(fn, a.data, b.data))
-    );
-  }
-  return op;
+const typeD = [{ default: type1 }];
+// 充
+function fill1(x) {
+  if (x instanceof Arr) return Ok(new Atom(x.type, x.fill));
+  if (x instanceof Boxes) return Ok(x.fill);
+  return Err(`fill.get_atom_not_allowed`);
 }
-const add2 = mapA2((aType, bType) => {
-  for (const type of AtomNums) {
-    if (aType === type && bType === type) return Ok([(x, y) => x + y, type]);
+function fill2(w, x) {
+  if (x instanceof Arr) {
+    if (x.type !== w.type) return Err(`fill.set_type_mismatch`);
+    return Ok(new Arr(x.type, x.shape, x.data, w));
   }
-  for (const type of AtomInts) {
-    if (aType === AtomTypes.char && bType === type)
-      return Ok([
-        (x, y) => String.fromCharCode(x.charCodeAt(0) + y),
-        AtomTypes.char,
-      ]);
-    if (bType === AtomTypes.char && aType === type)
-      return Ok([
-        (x, y) => String.fromCharCode(x + y.charCodeAt(0)),
-        AtomTypes.char,
-      ]);
-  }
-  return Err(`add not supported for types ${aType} and ${bType}`);
-});
-const sub2 = mapA2((aType, bType) => {
-  for (const type of AtomNums) {
-    if (aType === type && bType === type) return Ok([(x, y) => x - y, type]);
-  }
-  for (const type of AtomInts) {
-    if (aType === AtomTypes.char && bType === type)
-      return Ok([
-        (x, y) => String.fromCharCode(x.charCodeAt(0) - y),
-        AtomTypes.char,
-      ]);
-    if (bType === AtomTypes.char && aType === type)
-      return Ok([
-        (x, y) => String.fromCharCode(x - y.charCodeAt(0)),
-        AtomTypes.char,
-      ]);
-  }
-  return Err(`minus not supported for types ${aType} and ${bType}`);
-});
-const mul2 = mapA2((aType, bType) => {
-  for (const type of AtomNums) {
-    if (aType === type && bType === type) return Ok([(x, y) => x * y, type]);
-  }
-  return Err(`mult not supported for types ${aType} and ${bType}`);
-});
-const div2 = mapA2((aType, bType) => {
-  for (const type of AtomInts) {
-    if (aType === type && bType === type)
-      return Ok([(x, y) => Math.trunc(x / y), type]);
-  }
-  for (const type of AtomFloats) {
-    if (aType === type && bType === type) return Ok([(x, y) => x / y, type]);
-  }
-  return Err(`div not supported for types ${aType} and ${bType}`);
-});
-
-/// unary functions
-function indices(shape, i) {
-  const result = Array(shape.length);
-  for (let j = shape.length - 1; j >= 0; j--) {
-    result[j] = i % shape[j];
-    i = Math.floor(i / shape[j]);
-  }
-  return result;
+  if (x instanceof Boxes) return Ok(new Boxes(x.shape, x.data, w));
+  return Err(`fill.set_atom_not_allowed`);
 }
-function range(a) {
-  if (a instanceof Atom) {
-    if (AtomInts.includes(a.type)) {
-      if (a.value < 0) return Err(`range: cannot be negative`);
-      const data = Array.from({ length: a.value }, (_, i) => i);
-      return Ok(new Arr(AtomTypes.int32, [a.value], data));
-    }
-    return Err(`range: unsupported type ${a.type}`);
-  }
-  if (a instanceof Boxes) return liftOk(a.data.map(range)).map(nest(a.shape));
-  if (AtomInts.includes(a.type)) {
-    if (a.shape.length < 1)
-      return Err(`range: shape must have at least one dimension`);
-    const newShape = [...a.data, a.shape[0]];
-    const len = product(a.data);
-    const newData = Array(len * a.shape[0]);
-    for (let i = 0; i < len; i++) {
-      const ins = indices(a.data, i);
-      for (let j = 0; j < a.shape[0]; j++) newData[i * a.shape[0] + j] = ins[j];
-    }
-    return Ok(new Arr(a.type, newShape, newData));
-  }
-  return Err(`range: unsupported type ${a.type}`);
+const fillD = [{ default: fill1 }, { default: fill2 }];
+// 「对数」
+const log1 = [
+  ...AtomFloats.map((type) => [[type], type, (x) => Math.log(x)]),
+  ...AtomInts.map((type) => [[type], AT.float32, (x) => Math.log(x)]),
+];
+const log2 = [
+  ...AtomFloats.map((type) => [
+    [type, type],
+    type,
+    (w, x) => Math.log(w) / Math.log(x),
+  ]),
+  ...AtomInts.map((type) => [
+    [type, type],
+    AT.float32,
+    (w, x) => Math.log(w) / Math.log(x),
+  ]),
+];
+const logD = [{ table: log1 }, { table: log2 }];
+// 「组长」
+function groupLen2(w, x) {
+  if (!(w instanceof Atom && AtomInts.includes(w.type)))
+    return Err(`group_length.w_is_not_int_atom`);
+  if (!(x instanceof Arr && AtomInts.includes(x.type)))
+    return Err(`group_length.x_is_not_int_array`);
+  let len = -1;
+  for (const a of x.data) len = Math.max(len, a);
+  const newData = Array(Math.max(len + 1, w.value)).fill(0);
+  for (const a of x.data) newData[a] += 1;
+  return Ok(new Arr(AT.int32, [newData.length], newData, 0));
 }
-function length(a) {
-  if (a instanceof Atom) return Err(`length: cannot be called on an atom`);
-  return Ok(new Atom(AtomTypes.int32, a.shape[0]));
+const groupLengthD = [undefined, { default: groupLen2 }];
+// 断
+function assert1(x) {
+  if (x instanceof Atom && x.type === AT.bool && x.value === true) return Ok(x);
+  return Err(x);
 }
-function reshape(shape, a) {
-  const theShape = shape instanceof Atom ? [shape.value] : shape.data;
-  const len = product(theShape);
-  if (a instanceof Atom)
-    return Ok(new Arr(a.type, theShape, Array(len).fill(a.value)));
-  const newData = Array(len);
-  for (let i = 0; i < len; i++) newData[i] = a.data[i % a.data.length];
-  return Ok(
-    a instanceof Boxes
-      ? new Boxes(theShape, newData)
-      : new Arr(a.type, theShape, newData)
-  );
+// 「组数」
+function groupOrd2(w, x) {
+  if (!(w instanceof Arr && AtomInts.includes(w.type)))
+    return Err(`group_ord.w_is_not_int_array`);
+  return Err(`group_ord.not_implemented`);
 }
-
-/// adverbs
-function table2(fn) {
-  return (a, b) => {
-    if (a instanceof Atom || b instanceof Atom) return fn(a, b);
-  };
+// 负
+const negate1 = AtomNums.map((type) => [[type], type, (x) => -x]);
+const negateD = [{ table: negate1 }];
+// 加
+const addCharNum = (w, x) => String.fromCharCode(w.charCodeAt(0) + x);
+const add2 = [
+  [[AT.bool, AT.bool], AT.bool, (w, x) => x || y],
+  ...AtomNums.map((type) => [[type, type], type, (w, x) => w + x]),
+  ...AtomInts.map((type) => [[AT.char, type], AT.char, addCharNum]),
+  ...AtomInts.map((type) => [
+    [type, AT.char],
+    AT.char,
+    (w, x) => addCharNum(x, w),
+  ]),
+];
+const addD = [undefined, { table: add2 }];
+// 减
+const sub2 = [
+  [[AT.bool, AT.bool], AT.bool, (w, x) => w && !x],
+  ...AtomNums.map((type) => [[type, type], type, (w, x) => w - x]),
+  ...AtomInts.map((type) => [
+    [AT.char, type],
+    AT.char,
+    (w, x) => addCharNum(w, -x),
+  ]),
+  [[AT.char, AT.char], AT.int32, (w, x) => w.charCodeAt(0) - x.charCodeAt(0)],
+];
+const subD = [undefined, { table: sub2 }];
+// 乘
+const mul2 = [
+  [[AT.bool, AT.bool], AT.bool, (w, x) => w && x],
+  ...AtomNums.map((type) => [[type, type], type, (w, x) => w * x]),
+];
+const mulD = [undefined, { table: mul2 }];
+// 「除以」
+const div2 = [
+  ...AtomInts.map((type) => [[type, type], type, (w, x) => Math.trunc(w / x)]),
+  ...AtomFloats.map((type) => [[type, type], type, (w, x) => w / x]),
+];
+const divD = [undefined, { table: div2 }];
+// 幂
+const pow1 = [
+  ...AtomFloats.map((type) => [[type], type, (x) => Math.exp(x)]),
+  ...AtomInts.map((type) => [[type], AT.float32, (x) => Math.exp(x)]),
+];
+const pow2 = AtomNums.map((type) => [
+  [type, type],
+  type,
+  (w, x) => Math.pow(w, x),
+]);
+const powD = [{ table: pow1 }, { table: pow2 }];
+// 底
+const base1 = [
+  ...AtomNums.map((type) => [[type], type, (x) => Math.floor(x)]),
+  ...AtomFloats.map((type) => [[type], AT.int32, (x) => Math.floor(x)]),
+];
+const baseD = [{ table: base1 }];
+// 等
+function rank1(x) {
+  if (x instanceof Atom) return Ok(0);
+  return Ok(x.shape.length);
+}
+const eq2 = [
+  [[AT.bool, AT.bool], AT.bool, (w, x) => w === x],
+  ...AtomNums.map((type) => [[type, type], AT.bool, (w, x) => w === x]),
+  [[AT.char, AT.char], AT.bool, (w, x) => w === x],
+];
+const eqD = [{ default: rank1 }, { table: eq2 }];
+// 「大于」
+const gt2 = [
+  [[AT.bool, AT.bool], AT.bool, (w, x) => w && !x],
+  ...AtomNums.map((type) => [[type, type], AT.bool, (w, x) => w > x]),
+  [[AT.char, AT.char], AT.bool, (w, x) => w.charCodeAt(0) > x.charCodeAt(0)],
+];
+const gtD = [undefined, { table: gt2 }];
+// 形
+function shape1(x) {
+  if (x instanceof Atom) return Err(`shape.is_not_array`);
+  return Ok(new Arr(AT.int32, [x.shape.length], x.shape, 0));
 }
 
 /// tree-walking interpreter
-const ops = {
-  negate: [negate1, null],
-  add: [null, add2],
-  sub: [null, sub2],
-  mul: [null, mul2],
-  div: [null, div2],
-};
 export function run(tree) {}
 
 /// small tests
@@ -453,5 +423,3 @@ const flog = (x) => {
   }
   console.log(format(x).join("\n"));
 };
-let ans = toXNG("加（方（甲），加（方（乙），乘（2，加（甲，乙）））");
-flog(ans);
